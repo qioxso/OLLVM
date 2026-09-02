@@ -5,7 +5,7 @@
 | 目标 | 构建带 IR 混淆 pass 的第三方 Android NDK |
 | Host | `linux-x86_64`、`windows-x86_64` |
 | 构建 | GitHub Actions，CMake + Ninja |
-| 已实现 | 发现、重打包、自建 clang/lld、LLVM 20/21 overlay、本地测试 |
+| 已实现 | 发现、重打包、自建 clang、LLVM 20/21 overlay、本地测试 |
 | 待验证 | GitHub Actions 完整构建、Windows CI |
 | 许可 | 项目新增代码 GPL-3.0；overlay 保留上游许可 |
 
@@ -92,7 +92,7 @@ ROADMAP.md             实现状态和待办
 
 Linux 使用 runner 自带 clang/lld 作为宿主编译器。Windows 使用 MSVC。默认构建 `AArch64;ARM;X86`，覆盖 arm64-v8a、armeabi-v7a、x86 和 x86_64。
 
-构建只替换白名单中的 clang/lld/strip/objcopy 及 `lib/clang/<major>/include`。官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本保持不变。
+当前构建目标只产出并替换白名单中的 clang 及 `lib/clang/<major>/include`；白名单里的其它工具仅在构建目录实际存在时才覆盖。官方 NDK 的 lld、strip、objcopy、sysroot、libc++、compiler-rt 和构建脚本保持不变。
 
 LLVM major 从包内 `AndroidVersion.txt` 读取，不根据 NDK tag 推测。当前仓库维护 LLVM 20 和 21 overlay；遇到其他 major 时 `build` 失败。
 

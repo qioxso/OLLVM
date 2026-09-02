@@ -479,18 +479,19 @@ Value * encryptConstant(Constant *plainConstant, Instruction *insertBefore, Cryp
     return plainConstant;
   }
 
-  const auto Key = ConstantInt::get(
-      IntegerType::get(Ctx, BitWidth),
-      randomEngine->get_uint64_t());
+  auto *IntTy = IntegerType::get(Ctx, BitWidth);
+  const auto Key = ConstantInt::get(IntTy, randomEngine->get_uint64_t());
 
-  const auto ConstantInt = ConstantExpr::getBitCast(plainConstant, Key->getType());
-  auto Enc = ConstantExpr::getSub(ConstantInt, Key);
-  Constant *XorKey = nullptr;
+  const auto PlainInt = ConstantExpr::getBitCast(plainConstant, Key->getType());
+  auto Enc = ConstantExpr::getSub(PlainInt, Key);
+  ConstantInt *XorKey = nullptr;
   if (level) {
-    XorKey = ConstantInt::get(Key->getType(), randomEngine->get_uint64_t());
+    XorKey = ConstantInt::get(IntTy, randomEngine->get_uint64_t());
     Enc = ConstantExpr::getXor(Enc, XorKey);
     if (level > 1) {
-      Enc = ConstantExpr::getXor(Enc, ConstantExpr::get(Instruction::Mul, XorKey, Key));
+      auto *MulKey = ConstantInt::get(
+          Ctx, XorKey->getValue() * Key->getValue());
+      Enc = ConstantExpr::getXor(Enc, MulKey);
     }
     if (level > 2) {
       Enc = ConstantExpr::getXor(Enc, ConstantExpr::getNeg(XorKey));

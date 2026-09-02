@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# overlay_ndk.sh — 用自建的 clang/lld 二进制，按白名单覆盖官方 NDK 的工具链 bin/。
+# overlay_ndk.sh — 用自建的 LLVM/Clang 二进制，按白名单覆盖官方 NDK 的工具链 bin/。
 #
 #   overlay_ndk.sh --built <ninja build 根> --ndk <NDK 根> --host <host> --major <N> [--dry-run]
 #
@@ -27,7 +27,8 @@ DST_BIN="$DST_PREBUILT/bin"
 [[ -d "$SRC_BIN" ]] || { echo "[error] 自建 bin 不存在：$SRC_BIN" >&2; exit 1; }
 [[ -d "$DST_BIN" ]] || { echo "[error] NDK bin 不存在：$DST_BIN" >&2; exit 1; }
 
-# 白名单：随混淆 pass 一起构建、会影响产物的宿主工具。
+# 白名单：只覆盖构建目录中实际存在的宿主工具。当前 Actions 只构建 clang，
+# 因而 lld/strip/objcopy 默认继续使用官方 NDK 文件。
 # Windows host 的 NDK 与自建产物二进制带 .exe 后缀，按 host 追加。
 EXT=""
 case "$HOST" in

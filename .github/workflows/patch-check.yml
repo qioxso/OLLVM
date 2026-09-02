@@ -14,6 +14,8 @@ on:
     - "scripts/apply_overlay.sh"
     - "scripts/overlay_ndk.sh"
     - "tests/string-enc/**"
+    - "tests/constant-enc/**"
+    - "tests/vmp-smoke/**"
     - "tests/abi-smoke/**"
     - "tests/build-system-smoke/**"
     - "tests/discover/**"

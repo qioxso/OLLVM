@@ -242,6 +242,14 @@ jobs:
       if: ${{ inputs.mode == 'build' }}
       run: bash tests/string-enc/check.sh "$NDK_DIR" "$HOST"
 
+    - name: 高强度常量加密测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/constant-enc/run.sh "$NDK_DIR" "$HOST"
+
+    - name: VMP 产物与选择测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/vmp-smoke/run.sh "$NDK_DIR" "$HOST"
+
     - name: 去指纹测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
       run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"

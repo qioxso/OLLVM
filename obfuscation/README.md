@@ -113,7 +113,7 @@ Transforms/Obfuscation/
 
 > **关于 `.comment` 的彻底清零**：编译期只能去掉**本模块**的贡献。最终 `.so` 的 `.comment` 还来自官方 NDK 的 CRT/libc++/compiler-rt 目标与 lld，工具链把链接后的 `.so` 直接交给用户、没有 link 后处理入口，故无法在 clang 内清零。需要时在 link 后自行执行 `llvm-strip -R .comment <输出.so>`（该工具已随 NDK 提供）。注意本项目的 clang 版本串与官方 NDK clang 相同，`.comment` **并非**混淆工具链的唯一指纹，此项为纵深防御。
 
-VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
+VMP 已完成 IR、clang codegen、原生 aarch64 `.so` 和 arm64 真机语义等价验证；`tests/vmp-smoke` 在构建流水线静态检查函数选择、fail-safe 回退、字节码 blob、解释器克隆和 ELF 布局。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
 

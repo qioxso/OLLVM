@@ -22,7 +22,7 @@
 ## 阶段 1b — 自建 clang（无混淆）
 
 - [x] 浅克隆 `llvm-project@base_commit`
-- [x] cmake + ninja 编 `clang;lld`（Linux：free-disk-space）
+- [x] cmake + ninja 编 `clang;clang-resource-headers`（Linux：free-disk-space）；lld 保留官方 NDK 版本
 - [x] `overlay_ndk.sh` 白名单覆盖官方 NDK 的 `bin/` + resource include
 - [x] 四 ABI、CMake toolchain、ndk-build 冒烟接入 `build.yml`
 - [x] `mode=build` 缺少对应 LLVM major overlay 时 fail closed
@@ -36,7 +36,8 @@
 - [x] 命令行开关：`-irobf` / `-irobf-cse` / `-irobf-cie` / `-irobf-cfe` / `-irobf-fla` / `-irobf-indbr` / `-irobf-icall` / `-irobf-indgv` + `level-*`
 - [x] `apply_overlay.sh` 用 `git apply --check` 门控 registration.patch
 - [x] Pass 实现（字符串加密 / 平坦化 / 间接化 / 常量加密），本地验证：WSL/clang-20 编译 13 个 pass 0 错误；真实 r29 NDK 的 aarch64-android21 上 `tests/string-enc` rc=0
-- [~] 读 `llvm.global.annotations`：`readAnnotate` 把 `ndkp.string_encrypt`→`+cse`、`ndkp.fla`→`+fla` 折叠；但注解无法独立开启混淆（见「已知缺陷」#3）
+- [x] LLVM 20/21 高强度常量加密兼容：level 2/3 的密钥乘积在编译期折叠为 `ConstantInt`，不再生成 LLVM 21 不接受的 Mul `ConstantExpr`；`tests/constant-enc` 覆盖 CIE/CFE level 3
+- [~] 读 `llvm.global.annotations`：`readAnnotate` 把 `ndkp.string_encrypt`→`+cse`、`ndkp.fla`→`+fla` 折叠；但注解无法独立开启混淆（见「已知缺陷」#2）
 
 ## 阶段 2 — VMP（函数级虚拟化）
 
@@ -45,6 +46,7 @@
 - [x] 本地 IR + clang codegen 验证（trivial/scalar-loop/全 flag 同开；产出原生 aarch64 `.so`）
 - [x] 修复 `vmp_debug_id` 链接（解释器该符号漏了 `extern "C"`→C++ 修饰名，pass 的 `getFunction` 找不到→undefined symbol；曾阻塞任何 VMP 二进制链接）。真机 arm64-v8a 语义验证：单函数（compute 循环 / 返回字符串）+ 与 perkey/bind/fla 组合 + 纯 VMP+fla 均正确
 - [x] 多函数规模化 + **真正经解释器执行**：关键修复 `VMProtectPreparePass`（`PipelineStartEP` 早期给 VMP 目标打 `NoInline`+`llvm.compiler.used`，令 IPSCCP 停止参数追踪→调用点不被折叠）——此前"~1.0× 原生"实为函数被 inline/常量折叠掉、VM 桩死代码、根本没走 VM。同时修复 translator 循环/PHI 前向引用 bug（`basicblock_map` operator[] 污染致分支全跳 BB0 死循环；PHI 回边值未分配槽；PHI bb_id 未回填）。真机 arm64-v8a：直线/循环(LCG,FNV)/递归(fib)/内存(alloca,load,store,gep)/switch/VM→native/float 全 == 原生；旧"compute 挂死"已修。性能：真解释后 hot 循环 ~10000× 原生（故仅虚拟化小型/关键函数）；向量指令拒绝→安全回退原生。体积 +~1.8MB；剩：各 ABI 解释器扩展（当前仅 aarch64 bitcode）
+- [x] `tests/vmp-smoke` 接入 Actions：覆盖 `NDKP_VMP` 注解选择、`-irobf-vm_functions` 名称选择、未选择函数、向量 IR fail-safe 回退、字节码/解释器符号和 release ELF 段
 
 ## 阶段 1d / 2b — 编译期扩展保护
 
@@ -74,9 +76,8 @@
 按优先级排列：
 
 1. `registration.patch` 锚定 `add_subdirectory(HipStdPar)`。LLVM 20/21 已通过本地 `git apply --check`，仍需在 NDK 实际 Base revision 上跑 CI。
-2. LLVM 21 不支持 `Utils.cpp:493` 使用的 Mul `ConstantExpr`。问题只在 `-irobf-cie`/`-irobf-cfe` 且 `level >= 2` 时触发，应改为 IRBuilder 指令或禁用该分支。
-3. 注解不能单独启用 pass；仍需同时传入对应的 `-irobf-*` 开关。
-4. 个别 namespace 注释不准确，部分 `#include <iostream>` 未使用。
+2. 注解不能单独启用 pass；仍需同时传入对应的 `-irobf-*` 开关。
+3. 个别 namespace 注释不准确，部分 `#include <iostream>` 未使用。
 
 ## 发版前必做
 
