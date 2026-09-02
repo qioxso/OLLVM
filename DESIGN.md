@@ -1,0 +1,203 @@
+# Android NDK 混淆工具链设计
+
+| 项目 | 当前约束 |
+| --- | --- |
+| 目标 | 构建带 IR 混淆 pass 的第三方 Android NDK |
+| Host | `linux-x86_64`、`windows-x86_64` |
+| 构建 | GitHub Actions，CMake + Ninja |
+| 已实现 | 发现、重打包、自建 clang/lld、LLVM 20/21 overlay、本地测试 |
+| 待验证 | GitHub Actions 完整构建、Windows CI |
+| 许可 | 项目新增代码 GPL-3.0；overlay 保留上游许可 |
+
+## 1. 范围
+
+流水线完成以下工作：
+
+1. 从 Android NDK Releases 获取 Stable、Beta 和 RC 版本。
+2. 从 NDK 包内读取 LLVM major 和上游 `Base revision`。
+3. 按 LLVM major 应用混淆 overlay。
+4. 构建 clang、lld、llvm-strip 和 llvm-objcopy。
+5. 用自建工具覆盖官方 NDK 中对应的 Host 工具，保留 sysroot、libc++ 和各 ABI runtime。
+6. 通过测试后打包并发布。
+
+`Base revision` 只是官方编译器使用的上游 LLVM 基线，不包含 Google 未上游化的 Android Clang 补丁。因此产物兼容官方 NDK 的目录和构建入口，但不承诺与官方 clang 行为完全一致。
+
+当前不做以下事项：
+
+- 重建完整 Android NDK；
+- 支持 macOS Host；
+- 提供防破解保证；
+- 在未完成设备验证前发布 VMP、自加密或反分析功能。
+
+## 2. 设计约束
+
+| 约束 | 处理方式 |
+| --- | --- |
+| 官方 NDK 作为发行基座 | 只覆盖受影响的 Host 工具和 clang resource headers |
+| 源码版本必须可追踪 | `clang_source_info.md` 缺少 `Base revision` 时终止构建 |
+| `build` 必须包含混淆 | 找不到对应 LLVM major overlay 时终止构建 |
+| 默认不改变代码 | 没有开关时 overlay 不执行 IR 变换 |
+| 发布不可覆盖 | 构建或参数变化时递增 patchset，生成新 tag |
+| Host 发布保持一致 | 各 Host 先上传 artifact，再由一个 job 聚合发布 |
+
+## 3. 流水线
+
+```text
+discover.yml
+  Android NDK Releases API
+    -> 通道过滤
+    -> 读取内部版本
+    -> 计算 our_tag
+    -> 校验已有 Release 资产
+    -> Host 构建矩阵 + tag 发布矩阵
+
+build.yml（每个 Host）
+  下载 NDK
+    -> locate_llvm.py
+    -> llvm-project@Base revision
+    -> apply_overlay.sh
+    -> CMake + Ninja
+    -> overlay_ndk.sh
+    -> make_release_meta.py
+    -> 测试
+    -> artifact
+
+discover.yml（每个 tag）
+  下载全部 Host artifact
+    -> 校验资产数量
+    -> 生成 SHA256SUMS
+    -> 创建一次 Release
+```
+
+## 4. 仓库结构
+
+```text
+.github/workflows/     发现、构建和 patch 检查
+config/                通道和 patchset
+include/ndkp.h         用户注解宏
+obfuscation/llvm-*/    按 LLVM major 维护的 overlay
+scripts/               发现、定位、覆盖和元数据脚本
+tests/                 包结构、ABI、构建系统、字符串和发现逻辑测试
+README.md              用户入口
+CONTRIBUTING.md        开发约定
+ROADMAP.md             实现状态和待办
+```
+
+## 5. 构建
+
+### 模式
+
+- `repack`：不编译工具链，只写元数据并重新打包官方 NDK。
+- `build`：定位上游 LLVM 基线、应用 overlay、构建并覆盖工具链。缺少 overlay 时失败。
+
+Linux 使用 runner 自带 clang/lld 作为宿主编译器。Windows 使用 MSVC。默认构建 `AArch64;ARM;X86`，覆盖 arm64-v8a、armeabi-v7a、x86 和 x86_64。
+
+构建只替换白名单中的 clang/lld/strip/objcopy 及 `lib/clang/<major>/include`。官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本保持不变。
+
+LLVM major 从包内 `AndroidVersion.txt` 读取，不根据 NDK tag 推测。当前仓库维护 LLVM 20 和 21 overlay；遇到其他 major 时 `build` 失败。
+
+## 6. 版本与发布
+
+版本发现使用 `https://api.github.com/repos/android/ndk/releases`。默认检查最近 15 个 Release，自动处理 Stable、Beta 和 RC，Canary 默认关闭。
+
+命名格式：
+
+```text
+tag:      r<major>[hotfix]-<internal>[-betaN|-rcN]-p<N>
+artifact: android-ndk-<tag>-<host>.zip
+```
+
+示例：`r30-30.0.15729638-beta2-p2`。
+
+去重同时检查 tag 和资产。请求的 Host zip 与 `SHA256SUMS` 全部存在时才跳过。已有 Release 缺少资产时终止自动发布，并要求递增 patchset；`force` 只重建 artifact，不覆盖 Release。
+
+`build.yml` 只读取仓库、构建并上传 artifact，不持有 Release 写权限。只有 `discover.yml` 的聚合 job 拥有发布权限，并在全部 Host 成功后检查 tag、生成总校验文件并创建 Release。手动运行 `build.yml` 也只生成 artifact。
+
+## 7. 混淆 overlay
+
+目录约定：
+
+```text
+obfuscation/llvm-<major>/
+  Transforms/Obfuscation/
+  include/
+  registration.patch
+```
+
+一期使用静态 pass plugin。`registration.patch` 只向 `llvm/lib/Transforms/CMakeLists.txt` 增加 `add_subdirectory(Obfuscation)`；插件通过 `registerOptimizerLastEPCallback` 注册，不修改 Clang Driver 或 AArch64 后端。
+
+已实现的 `-mllvm` 开关：
+
+- `-irobf`；
+- `-irobf-cse`；
+- `-irobf-cse-perkey`、`-irobf-cse-bind`、`-irobf-cse-bind-package=`（字符串加密强化：ChaCha8 派生 per-string 密钥 / 包名绑定）；
+- `-irobf-cert-bind`、`-irobf-cert-file=`（APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥——与包名绑定同一「非分支、fail-closed」范式，仅在被指定证书签名时才正确解密/执行；证书从磁盘 APK v2/v3 签名块双源共识读取，避开可被 hook 的 `getPackageInfo`。字符串绑定需 `-irobf-cse`、VMP 密钥绑定需 `-irobf-vmp`；运行期读证书由 app 侧链接 `runtime/ndkp_apkcert.cpp` 提供，其余 IR 由 overlay 自动注入）；
+- `-irobf-cie`、`-irobf-cfe`；
+- `-irobf-fla`；
+- `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；
+- `-irobf-vmp`、`-irobf-vm_functions=`、`-irobf-vmp-noinline`（函数级虚拟化）；
+- `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
+- `-irobf-debug`（默认关）：调试模式。**关闭时（release，默认）**在所有 pass 跑完后对整模块去指纹——把 `.AProtect.*` 段改名为 `.s0/.s1/.s2/.s3`（标志由符号种类推导，逐位不变）、删除 VMP 解释器的 `vm_debug_log_*` 调试串（`[vm-debug]…`、`vm-entry` 等 stage 令牌）、剥除本模块 `llvm.ident`。开启时保留上述特征以便诊断。最终 `.so` 的 `.comment` 还含 NDK CRT/libc++/lld 贡献（无 link 后处理入口，且与官方 clang 同版本、非唯一指纹），彻底清零需 link 后 `llvm-strip -R .comment <输出.so>`。
+
+`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_STR_BIND`、`NDKP_FLATTEN`、`NDKP_VMP` 四个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.str_bind`、`ndkp.fla`、`ndkp.vmp`。`ndkp.string_encrypt` / `ndkp.str_bind` 折叠为 `+cse`、`ndkp.fla` 折叠为 `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。这些注解只圈定作用函数，仍需配合对应命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。例外：`NDKP_STR_BIND` 只要出现在模块任一函数上即会模块级开启 bind 模式（字符串加密对全模块生效），但仍需 `-irobf-cse` 与 `-irobf-cse-bind-package=<包名>`。
+
+AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
+
+## 8. 发布门槛
+
+每个 Host 在打包前执行：
+
+- 包结构和 `Ndkp.*` 元数据检查；
+- 四个 Android ABI 编链；
+- CMake toolchain 构建；
+- ndk-build 构建；
+- `-O0`、`-O2`、`-Oz` 字符串加密扫描。
+
+这些测试确认工具链可构建目标文件且指定明文不出现在 ELF 中。Android 运行时行为仍需设备或模拟器测试。
+
+## 9. 元数据与许可
+
+包内新增：
+
+- `NDKP-build-info.json`；
+- `NDKP-patch-report.json`；
+- `LICENSES/NDKP-GPL-3.0.txt`；
+- `LICENSES/LLVM-UIUC.txt`；
+- `LICENSES/LIBTOMCRYPT-UNLICENSE.txt`；
+- `source.properties` 中的 `Ndkp.*` 字段。
+
+聚合发布生成一份覆盖全部 Host zip 的 `SHA256SUMS`。当前记录 `SOURCE_DATE_EPOCH`，但尚未完成固定随机种子和双构建一致性验证，因此不声明可复现构建。
+
+## 10. 后续工作
+
+实现顺序以 [ROADMAP.md](./ROADMAP.md) 为准。以下功能已实现于 overlay，但在满足前置条件（设备验证）前不进入自动发布：
+
+| 功能 | 发布前置条件 |
+| --- | --- |
+| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。体积开销 perkey +3.1KB / bind +3.8KB（解码一次性缓存，运行期 ~0）；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。待 CI patch-check 实跑 |
+| 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
+| 代码完整性自校验（`-irobf-selfcheck`） | 已实现（**VMP 字节码内部校验**）：只校验 VMP 产出的每函数字节码 blob（`gv_code_seg_<fn>`，编译期已知的常量字节、段 `.AProtect.data`）。Pass 编译期算出各 blob 的 FNV-1a64 并内嵌，注入 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期 volatile 读重算比对，不符即调 `DetectUtils` 的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止（**主响应**）。**纵深防御层（现已真机验证生效）**：把哈希 XOR 累加折进 `vmp_shared_vm_function_key` 入口桩存——`store (realkey^expected_acc)^load(runtime_acc)`；篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器解出乱码 → 崩溃。**真正的密码学绑定、非分支门禁**（即便 kill 分支被 patch，篡改仍经此层破坏执行；真机实测中和 kill 后未篡改正确/篡改 rc=137）。此前误判为"惰性"是因 VMP 被 inline/fold 绕过、VM 根本没执行；`VMProtectPreparePass` 修复后本层生效。因 blob 是数据段纯常量、运行期只读不写 → **无需重定位归一化、无需链接后回填工具**。范围：只覆盖 VMP 字节码，不含解释器 `.text` 或非 VMP 代码 |
+| VMP（`-irobf-vmp`） | 已实现且**真机验证真正经解释器执行**。**关键修复（2026-07）**：VMP 在 OptimizerLast 运行，早于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。**并修复 translator 的循环/PHI 前向引用 bug**（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填）——改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。**性能**：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展 |
+| AArch64 后端混淆 | 独立补丁和机器码测试 |
+| macOS Host | runner、dmg 打包和签名处理 |
+
+函数级 SO 自加密只保留为实验项。开始实现前必须先验证：
+
+1. 加密函数可放入页对齐、页独占的 `PT_LOAD`；
+2. 加密页不存在动态 relocation 目标；
+3. Android 允许匿名页从 RW 切换到 RX；
+4. 可在原虚拟地址安全替换映射，保持直接调用、函数指针和 unwind 地址有效。
+
+任一条件不成立即停止该方案，不在正式构建中降级启用。
+
+## 11. 风险
+
+| 风险 | 处理 |
+| --- | --- |
+| LLVM 更新导致 overlay 失效 | 按 major 维护，`git apply --check` 和构建测试 |
+| 免费 runner 超时或磁盘不足 | 单链接任务，必要时使用 larger/self-hosted runner |
+| 缺少 Android 下游补丁 | 在文档和元数据中明确第三方构建，不承诺官方行为一致 |
+| 优化后重新出现明文 | 多优化级别扫描最终 ELF |
+| Release 只包含部分 Host | 聚合发布；残缺 Release 不覆盖 |
+| Windows 构建差异 | 发布前完成 Windows CI 实跑 |
+| 随机化影响复现 | 后续接入固定 seed 并做双构建比对 |

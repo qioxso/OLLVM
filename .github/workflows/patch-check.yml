@@ -1,0 +1,48 @@
+name: patch-check
+
+# 非发布验证：复用只读的 build.yml（应用 overlay、编 clang、跑完整构建门槛），
+# 默认编四个主流 Android ABI 所需的 AArch64/ARM/X86 后端。正式发版由 discover.yml 聚合产物后完成。
+on:
+  workflow_dispatch:
+    inputs:
+      ndk_tag: { description: "取基线 LLVM 源码所用的 NDK tag", required: false, default: "r29" }
+      internal: { description: "该 NDK 内部版本号", required: false, default: "29.0.14206865" }
+      targets: { description: "LLVM_TARGETS_TO_BUILD（需覆盖四 ABI）", required: false, default: "AArch64;ARM;X86" }
+  pull_request:
+    paths:
+    - "obfuscation/**"
+    - "scripts/apply_overlay.sh"
+    - "scripts/overlay_ndk.sh"
+    - "tests/string-enc/**"
+    - "tests/abi-smoke/**"
+    - "tests/build-system-smoke/**"
+    - "tests/discover/**"
+    - "scripts/discover_ndk.py"
+    - ".github/workflows/build.yml"
+    - ".github/workflows/patch-check.yml"
+
+# PR 检查与可复用构建都只需要读取仓库内容。
+permissions:
+  contents: read
+
+jobs:
+  discover-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python tests/discover/test_discover.py
+
+  verify:
+    uses: ./.github/workflows/build.yml
+    with:
+      ndk_tag: ${{ github.event.inputs.ndk_tag || 'r29' }}
+      our_tag: patch-check
+      internal: ${{ github.event.inputs.internal || '29.0.14206865' }}
+      channel: stable
+      host: linux-x86_64
+      mode: build
+      targets: ${{ github.event.inputs.targets || 'AArch64;ARM;X86' }}
+      download_url: ""
