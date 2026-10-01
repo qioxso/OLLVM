@@ -108,7 +108,7 @@ jobs:
 
     - name: 清理磁盘空间
       if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-      uses: jlumbroso/free-disk-space@v1.3.1
+      uses: jlumbroso/free-disk-space@v2.0.0
       with:
         tool-cache: true
         large-packages: false
